@@ -11,6 +11,7 @@ import sys
 import psutil
 import re
 import time
+import json
 from tabulate import tabulate
 
 # Color codes for output
@@ -87,61 +88,182 @@ def get_system_memory_info():
         log_error(f"Error getting system memory info: {e}")
         return {}
 
-def get_node_processes():
-    """Get all Node.js processes with detailed information"""
-    try:
-        result = subprocess.run(['ps', 'aux'], capture_output=True, text=True)
-        lines = result.stdout.strip().split('\n')
-        
-        # Skip header
-        data_lines = lines[1:]
-        node_processes = []
-        
-        for line in data_lines:
-            if 'node' in line.lower() and 'grep' not in line.lower():
-                parts = line.split()
-                if len(parts) >= 11:
+def find_node_packages(root_path=None, max_depth=5):
+    """Find all Node.js packages (directories with package.json) recursively"""
+    if root_path is None:
+        # Default to common locations where Node projects might be found
+        root_paths = [
+            os.path.expanduser("~"),
+            os.getcwd(),
+            "/Users",  # macOS default user directory
+        ]
+    else:
+        root_paths = [root_path]
+    
+    node_packages = []
+    package_json_pattern = re.compile(r'package\.json$', re.IGNORECASE)
+    
+    for root_path in root_paths:
+        if not os.path.exists(root_path):
+            continue
+            
+        for dirpath, dirnames, filenames in os.walk(root_path):
+            # Calculate current depth from root
+            current_depth = dirpath[len(root_path):].count(os.sep)
+            if current_depth > max_depth:
+                # Prune the search by clearing dirnames
+                dirnames.clear()
+                continue
+            
+            if 'node_modules' in dirpath:
+                # Skip node_modules directories (they contain many packages but are dependencies)
+                dirnames.clear()
+                continue
+                
+            for filename in filenames:
+                if package_json_pattern.match(filename):
+                    package_path = os.path.join(dirpath, filename)
                     try:
-                        user = parts[0]
-                        pid = parts[1]
-                        cpu_percent = float(parts[2])
-                        mem_percent = float(parts[3])
-                        vsz = int(parts[4])  # Virtual size in KB
-                        rss = int(parts[5])  # Resident Set Size in KB
-                        command = ' '.join(parts[10:])
+                        with open(package_path, 'r', encoding='utf-8') as f:
+                            # Try to parse package.json to get project info
+                            try:
+                                package_data = json.load(f)
+                                name = package_data.get('name', 'Unknown')
+                                version = package_data.get('version', 'Unknown')
+                                scripts = package_data.get('scripts', {})
+                                dependencies = package_data.get('dependencies', {})
+                                dev_dependencies = package_data.get('devDependencies', {})
+                                total_deps = len(dependencies) + len(dev_dependencies)
+                            except json.JSONDecodeError:
+                                name = 'Unknown (malformed package.json)'
+                                version = 'Unknown'
+                                scripts = {}
+                                total_deps = 0
                         
-                        # Filter out system processes that are not actual node apps
-                        if any(keyword in command.lower() for keyword in [
-                            'com.apple', 'system', 'utility', 'helper', 'plugin', 
-                            '/usr/libexec/', '/System/', 'node_modules'
-                        ]) and not any(keyword in command.lower() for keyword in [
-                            '.js', 'server', 'app', 'index', 'main', 
-                            'mcp-server', 'hybrowser', 'stagehand', 'ollama'
-                        ]):
-                            continue
+                        # Get directory info
+                        project_dir = os.path.dirname(package_path)
                         
-                        node_processes.append({
-                            'user': user,
-                            'pid': pid,
-                            'cpu_percent': cpu_percent,
-                            'mem_percent': mem_percent,
-                            'vsz_kb': vsz,
-                            'rss_kb': rss,
-                            'vsz_formatted': format_memory(vsz),
-                            'rss_formatted': format_memory(rss),
-                            'command': command,
-                            'type': 'development' if any(keyword in command.lower() for keyword in [
-                                'mcp-server', 'hybrowser', 'stagehand', 'ollama', 'qwen',
-                                '.js', 'server', 'app', 'index', 'main'
-                            ]) else 'system'
+                        node_packages.append({
+                            'path': project_dir,
+                            'name': name,
+                            'version': version,
+                            'scripts': list(scripts.keys()),
+                            'dependency_count': total_deps,
+                            'has_dev_server': any(script for script in ['start', 'dev', 'serve', 'watch'] if script in scripts)
                         })
-                    except (ValueError, IndexError):
+                    except (PermissionError, UnicodeDecodeError):
+                        # Skip files we can't read
                         continue
+    
+    return node_packages
+
+
+def display_node_packages(node_packages):
+    """Display Node packages in a formatted table"""
+    if not node_packages:
+        log_success("No Node.js packages found")
+        return
+    
+    # Prepare table data
+    table_data = []
+    
+    for i, pkg in enumerate(node_packages, 1):
+        # Truncate long fields for better display
+        display_name = pkg['name'][:20] if len(pkg['name']) > 20 else pkg['name']
+        display_path = pkg['path'][-30:] if len(pkg['path']) > 30 else pkg['path']  # Show last 30 chars
+        display_scripts = ', '.join(pkg['scripts'][:3]) + '...' if len(pkg['scripts']) > 3 else ', '.join(pkg['scripts'])
+        display_scripts = display_scripts[:20] if len(display_scripts) > 20 else display_scripts
         
-        return node_processes
-    except Exception as e:
-        log_error(f"Error getting node processes: {e}")
-        return []
+        table_data.append([
+            i,
+            display_name,
+            pkg['version'],
+            pkg['dependency_count'],
+            'Yes' if pkg['has_dev_server'] else 'No',
+            display_scripts,
+            display_path
+        ])
+    
+    # Display table
+    headers = ["ID", "Name", "Version", "Deps", "Dev Server", "Scripts", "Path"]
+    print(tabulate(table_data, headers=headers, tablefmt="grid"))
+    
+    # Display summary
+    print()
+    log_info(f"Total Node.js packages found: {len(node_packages)}")
+
+
+def interactive_node_package_manager(node_packages):
+    """Interactive menu for managing Node packages"""
+    if not node_packages:
+        log_success("No Node.js packages found to manage")
+        return
+    
+    while True:
+        print("\nSelect action for Node packages:")
+        print("  Enter number to view package details")
+        print("  'l' to list all packages again")
+        print("  'q' to return to main menu")
+        print("Choice: ", end="")
+        
+        try:
+            choice = input().strip().lower()
+            
+            if choice == 'q':
+                log_info("Returning to main menu...")
+                break
+            elif choice == 'l':
+                display_node_packages(node_packages)
+            elif choice.isdigit():
+                index = int(choice)
+                if 1 <= index <= len(node_packages):
+                    pkg = node_packages[index - 1]
+                    
+                    print(f"\n{COLORS['yellow']}Package Details:{COLORS['nc']}")
+                    print(f"  Name: {pkg['name']}")
+                    print(f"  Version: {pkg['version']}")
+                    print(f"  Path: {pkg['path']}")
+                    print(f"  Dependencies: {pkg['dependency_count']}")
+                    print(f"  Has Development Server: {'Yes' if pkg['has_dev_server'] else 'No'}")
+                    print(f"  Scripts: {', '.join(pkg['scripts'])}")
+                    
+                    print("\nOptions:")
+                    print("  'o' to open package directory in Finder (macOS) or file manager")
+                    print("  'e' to explore package directory in terminal")
+                    print("  'r' to return to package list")
+                    print("Choice: ", end="")
+                    
+                    sub_choice = input().strip().lower()
+                    if sub_choice == 'o':
+                        # Open package directory in Finder/Explorer
+                        try:
+                            if sys.platform.startswith('darwin'):  # macOS
+                                subprocess.run(['open', pkg['path']], check=True)
+                            elif sys.platform.startswith('win'):  # Windows
+                                subprocess.run(['explorer', pkg['path']], check=True)
+                            elif sys.platform.startswith('linux'):  # Linux
+                                subprocess.run(['xdg-open', pkg['path']], check=True)
+                            log_success(f"Opened {pkg['path']} in file manager")
+                        except subprocess.CalledProcessError:
+                            log_error(f"Failed to open {pkg['path']}")
+                    elif sub_choice == 'e':
+                        print(f"\nTo explore this directory in terminal, run:")
+                        print(f"  cd '{pkg['path']}'")
+                    elif sub_choice != 'r':
+                        log_warning("Invalid choice, returning to package list...")
+                else:
+                    log_warning(f"Invalid choice. Please enter a number between 1 and {len(node_packages)}, 'l', or 'q'.")
+            else:
+                log_warning("Invalid choice. Please enter a number, 'l', or 'q'.")
+        except KeyboardInterrupt:
+            print("\n")
+            log_info("Returning to main menu...")
+            break
+        except EOFError:
+            print()
+            log_info("Returning to main menu...")
+            break
+
 
 def get_memory_health_report():
     """Generate a comprehensive memory health report"""
@@ -345,6 +467,7 @@ def interactive_menu(processes):
         print("  Enter number to kill a specific process")
         print("  'a' to kill ALL processes")
         print("  'r' to refresh the list")
+        print("  'n' to find and manage Node.js packages")
         print("  'm' to show memory health")
         print("  'q' to quit")
         print("Choice: ", end="")
@@ -352,7 +475,12 @@ def interactive_menu(processes):
         try:
             choice = input().strip().lower()
             
-            if choice == 'q':
+            if choice == 'n':
+                log_info("Scanning for Node.js packages...")
+                node_packages = find_node_packages()
+                display_node_packages(node_packages)
+                interactive_node_package_manager(node_packages)
+            elif choice == 'q':
                 log_info("Exiting...")
                 break
             elif choice == 'a':
@@ -383,9 +511,9 @@ def interactive_menu(processes):
                     else:
                         log_info("Cancelled")
                 else:
-                    log_warning(f"Invalid choice. Please enter a number between 1 and {len(processes)}, 'a', 'r', 'm', or 'q'.")
+                    log_warning(f"Invalid choice. Please enter a number between 1 and {len(processes)}, 'a', 'r', 'n', 'm', or 'q'.")
             else:
-                log_warning("Invalid choice. Please enter a number, 'a', 'r', 'm', or 'q'.")
+                log_warning("Invalid choice. Please enter a number, 'a', 'r', 'n', 'm', or 'q'.")
         except KeyboardInterrupt:
             print("\n")
             log_info("Exiting...")
@@ -422,6 +550,39 @@ def show_help():
     print("• Refresh option to update the process list")
     print("• Memory health report with Node.js analysis")
     print("• Confirmation prompts for safety")
+
+def main():
+    """Main function"""
+    # Check for help flag
+    if len(sys.argv) > 1 and sys.argv[1] in ['-h', '--help']:
+        show_help()
+        return
+    
+    # Check if required commands are available
+    required_commands = ['lsof', 'vm_stat', 'ps']
+    for cmd in required_commands:
+        if not subprocess.run(['which', cmd], capture_output=True).returncode == 0:
+            log_error(f"{cmd} command not found. Please install {cmd} to use this script.")
+            sys.exit(1)
+    
+    print(f"{COLORS['green']}🧛 Vampire Hunter - Process Manager{COLORS['nc']}")
+    print("=" * 38)
+    print()
+    
+    # Main loop to allow refreshing
+    while True:
+        log_info("Scanning for server processes...")
+        processes = get_listening_processes()
+        display_processes(processes)
+        
+        # Also show memory health
+        display_memory_health()
+        
+        # Run interactive menu
+        should_refresh = interactive_menu(processes)
+        if not should_refresh:
+            break
+
 
 def main():
     """Main function"""
