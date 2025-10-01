@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Server Manager Script with Memory Usage
+# Vampire Hunter - Enhanced Process Manager with Memory Usage
 # Detects and interactively allows killing of server processes with memory info
 
 set -euo pipefail
@@ -11,6 +11,8 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 PURPLE='\033[0;35m'
+ORANGE='\033[0;33m'
+CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
 # Utility functions
@@ -30,6 +32,10 @@ log_error() {
     echo -e "${RED}❌ $*${NC}" >&2
 }
 
+log_vampire() {
+    echo -e "${ORANGE}🧛 $*${NC}"
+}
+
 # Function to format memory size
 format_memory() {
     local mem_kb=$1
@@ -42,6 +48,118 @@ format_memory() {
     else
         # KB
         echo "${mem_kb} KB"
+    fi
+}
+
+# Function to get system memory information
+get_system_memory_info() {
+    if command -v vm_stat &>/dev/null; then
+        # On macOS
+        local vmstat_output
+        vmstat_output=$(vm_stat 2>/dev/null)
+        
+        # Extract values
+        local pages_free=$(echo "$vmstat_output" | grep "Pages free:" | awk '{print $3}' | tr -d '.')
+        local pages_active=$(echo "$vmstat_output" | grep "Pages active:" | awk '{print $3}' | tr -d '.')
+        local pages_inactive=$(echo "$vmstat_output" | grep "Pages inactive:" | awk '{print $3}' | tr -d '.')
+        local pages_wired=$(echo "$vmstat_output" | grep "Pages wired down:" | awk '{print $4}' | tr -d '.')
+        local pages_compressed=$(echo "$vmstat_output" | grep "Pages stored in compressor:" | awk '{print $5}' | tr -d '.')
+        
+        # Calculate in MB (16384 bytes per page on macOS)
+        local page_size=16384
+        local mb_factor=$((1024 * 1024))
+        
+        # Export values for later use
+        export SYSTEM_FREE_MB=$(echo "scale=1; $pages_free * $page_size / $mb_factor" | bc -l)
+        export SYSTEM_ACTIVE_MB=$(echo "scale=1; $pages_active * $page_size / $mb_factor" | bc -l)
+        export SYSTEM_INACTIVE_MB=$(echo "scale=1; $pages_inactive * $page_size / $mb_factor" | bc -l)
+        export SYSTEM_WIRED_MB=$(echo "scale=1; $pages_wired * $page_size / $mb_factor" | bc -l)
+        export SYSTEM_COMPRESSED_MB=$(echo "scale=1; $pages_compressed * $page_size / $mb_factor" | bc -l)
+    fi
+}
+
+# Function to get Node.js processes
+get_node_processes() {
+    local ps_output
+    ps_output=$(ps aux | grep node | grep -v grep 2>/dev/null || true)
+    
+    if [ -z "$ps_output" ]; then
+        return
+    fi
+    
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        
+        local user=$(echo "$line" | awk '{print $1}')
+        local pid=$(echo "$line" | awk '{print $2}')
+        local cpu_percent=$(echo "$line" | awk '{print $3}')
+        local mem_percent=$(echo "$line" | awk '{print $4}')
+        local vsz=$(echo "$line" | awk '{print $5}')  # Virtual size in KB
+        local rss=$(echo "$line" | awk '{print $6}')  # RSS in KB
+        local command=$(echo "$line" | cut -d' ' -f11-)
+        
+        # Classify as development or system based on command
+        local process_type="system"
+        if [[ $command == *"mcp-server"* || $command == *"hybrowser"* || $command == *"stagehand"* || $command == *"ollama"* || $command == *"qwen"* || $command == *".js"* || $command == *"server"* || $command == *"app"* || $command == *"index"* || $command == *"main"* ]]; then
+            process_type="development"
+        fi
+        
+        echo "$user|$pid|$cpu_percent|$mem_percent|$vsz|$rss|$process_type|$command"
+    done <<< "$ps_output"
+}
+
+# Function to display memory health report
+display_memory_health() {
+    echo
+    echo -e "${CYAN}📊 System Memory Health Report${NC}"
+    echo "=================================================="
+    
+    # Get system memory info
+    get_system_memory_info
+    
+    # Display system memory info
+    if [ -n "${SYSTEM_FREE_MB:-}" ]; then
+        echo -e "${BLUE}System Memory:${NC}"
+        echo "  Free: ${SYSTEM_FREE_MB} MB"
+        echo "  Active: ${SYSTEM_ACTIVE_MB} MB"
+        echo "  Inactive: ${SYSTEM_INACTIVE_MB} MB"
+        echo "  Wired: ${SYSTEM_WIRED_MB} MB"
+        echo "  Compressed: ${SYSTEM_COMPRESSED_MB} MB"
+    fi
+    
+    # Get and display Node.js processes
+    local node_processes
+    node_processes=$(get_node_processes)
+    
+    if [ -n "$node_processes" ]; then
+        local node_count=$(echo "$node_processes" | wc -l | tr -d ' ')
+        local total_node_memory=0
+        
+        # Calculate total Node.js memory
+        while IFS= read -r node_line; do
+            [ -z "$node_line" ] && continue
+            local rss=$(echo "$node_line" | cut -d'|' -f6)
+            total_node_memory=$((total_node_memory + rss))
+        done <<< "$node_processes"
+        
+        echo -e "\n${GREEN}Node.js Processes:${NC}"
+        echo "Total Node.js processes: $node_count"
+        echo "Total Node.js memory usage: $(format_memory $total_node_memory)"
+        
+        # Display top Node.js processes
+        echo -e "\n${YELLOW}Top Node.js Processes by Memory Usage:${NC}"
+        echo "PID     CPU%   Mem%   RSS      Type         Command"
+        echo "------- ------ ------ -------- ------------ --------------------------------------------------"
+        
+        # Sort by RSS (memory usage) and show top 10
+        echo "$node_processes" | sort -t'|' -k6 -nr | head -10 | while IFS='|' read -r user pid cpu mem vsz rss type command; do
+            local rss_formatted=$(format_memory $rss)
+            local display_command=${command:0:50}
+            printf "%-7s %-6s %-6s %-8s %-12s %s\n" "$pid" "$cpu" "$mem" "$rss_formatted" "$type" "$display_command"
+        done
+    else
+        echo -e "\n${GREEN}Node.js Processes:${NC}"
+        echo "No Node.js processes found"
     fi
 }
 
@@ -203,6 +321,7 @@ manage_servers() {
         echo "Select action:"
         echo "  Enter number to kill a specific process"
         echo "  'a' to kill ALL processes"
+        echo "  'm' to show memory health"
         echo "  'q' to quit"
         echo -n "Choice: "
         
@@ -229,8 +348,11 @@ manage_servers() {
                 fi
                 return 0
                 ;;
+            m|M)
+                display_memory_health
+                ;;
             ''|*[!0-9]*)
-                log_warning "Invalid choice. Please enter a number, 'a', or 'q'."
+                log_warning "Invalid choice. Please enter a number, 'a', 'm', or 'q'."
                 ;;
             *)
                 if [ "$choice" -ge 1 ] && [ "$choice" -le "${#pids[@]}" ]; then
@@ -259,7 +381,7 @@ manage_servers() {
                     manage_servers
                     return 0
                 else
-                    log_warning "Invalid choice. Please enter a number between 1 and ${#pids[@]}, 'a', or 'q'."
+                    log_warning "Invalid choice. Please enter a number between 1 and ${#pids[@]}, 'a', 'm', or 'q'."
                 fi
                 ;;
         esac
@@ -279,14 +401,16 @@ show_help() {
     echo "The script will:"
     echo "1. Scan for processes listening on TCP ports (vampire processes)"
     echo "2. Show memory usage for each process"
-    echo "3. Present them in an interactive menu"
-    echo "4. Allow you to selectively kill them"
+    echo "3. Analyze Node.js processes and memory usage"
+    echo "4. Present them in an interactive menu"
+    echo "5. Allow you to selectively kill them"
     echo
     echo "Features:"
     echo "• Shows memory usage for each process"
     echo "• Safe process killing (SIGTERM first, then SIGKILL if needed)"
     echo "• Process details display"
     echo "• Selective or bulk killing options"
+    echo "• Memory health report with Node.js analysis"
     echo "• Confirmation prompts for safety"
 }
 
@@ -299,7 +423,7 @@ main() {
     fi
     
     # Check if required commands are available
-    for cmd in lsof ps bc; do
+    for cmd in lsof ps bc vm_stat; do
         if ! command -v "$cmd" &>/dev/null; then
             log_error "$cmd command not found. Please install $cmd to use this script."
             exit 1
@@ -309,6 +433,9 @@ main() {
     echo -e "${GREEN}🧛 Vampire Hunter - Process Manager${NC}"
     echo "=================================="
     echo
+    
+    # Show initial memory health
+    display_memory_health
     
     manage_servers
 }

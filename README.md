@@ -14,6 +14,8 @@ As developers, we often start local development servers, testing environments, a
 
 - 🔍 **Process Discovery**: Automatically detects all processes listening on TCP ports
 - 📊 **Memory Monitoring**: Shows detailed memory usage for each process
+- 🧠 **Node.js Analysis**: Advanced detection and analysis of Node.js processes (including development servers, MCP servers, VS Code extensions)
+- 📈 **System Memory Health**: Comprehensive memory usage reports with system memory breakdown
 - 🎯 **Interactive Selection**: Clean interface to selectively kill processes
 - 🛡️ **Safe Operations**: Uses graceful termination before force killing
 - 🔄 **Live Refresh**: Update the process list without restarting
@@ -72,6 +74,15 @@ python3 vampire_hunter.py -h
 python3 vampire_hunter.py
 ```
 
+### Memory Health Analysis
+
+The enhanced version provides comprehensive memory usage reports including:
+
+- **System Memory Breakdown**: Free, active, inactive, wired, and compressed memory
+- **Node.js Process Analysis**: Detailed breakdown of Node.js processes and their memory consumption
+- **Top Process Ranking**: Sorted list of highest memory-consuming processes
+- **Development vs System Process Classification**: Distinguishes between development tools and system processes
+
 ## Interface
 
 When you run Vampire Hunter, you'll see a formatted table like this:
@@ -87,12 +98,35 @@ When you run Vampire Hunter, you'll see a formatted table like this:
 
 🔹 Total processes: 3
 🔹 Total estimated memory usage: 197.8 MB
+
+📊 System Memory Health Report
+==================================================
+System Memory:
+  Free: 45.2 MB
+  Active: 2,456.7 MB
+  Inactive: 1,892.3 MB
+  Wired: 1,234.5 MB
+  Compressed: 3,456.2 MB
+
+Node.js Processes:
+Total Node.js processes: 5
+Total Node.js memory usage: 456.8 MB
+
+Top Node.js Processes by Memory Usage:
++-------+--------+----------+-------------+-------------------------------------------------------+
+|   PID | Mem%   | RSS      | Type        | Command                                               |
++=======+========+==========+=============+=======================================================+
+| 84847 | 1.2%   | 245.3 MB | development | node /path/to/dev-server                              |
+| 39042 | 0.8%   | 189.2 MB | development | node /path/to/agent                                   |
+| 14762 | 0.4%   | 98.7 MB  | system      | /Applications/VSCode.app/Contents/Frameworks/...      |
++-------+--------+----------+-------------+-------------------------------------------------------+
 ```
 
 ### Interactive Options
 
 - Enter a number to kill a specific process
 - `a` to kill ALL processes (with confirmation)
+- `m` to show memory health report (Python version)
 - `r` to refresh the process list
 - `q` to quit
 
@@ -113,8 +147,9 @@ Vampire Hunter is particularly useful for identifying these common resource-drai
 - **Build Tools**: Webpack dev servers, Vite, Parcel
 - **Database Tools**: Local MongoDB, PostgreSQL, MySQL instances
 - **IDE Helpers**: VS Code helpers, JetBrains background processes
+- **Node.js Development**: MCP servers, VS Code extensions, language servers
 - **Media Apps**: Spotify, Discord, Slack background processes
-- **AI Tools**: Ollama, local LLM servers
+- **AI Tools**: Ollama, local LLM servers, development agents
 - **Cloud Tools**: Docker containers, Kubernetes minikube
 
 ## Safety Features
@@ -122,6 +157,7 @@ Vampire Hunter is particularly useful for identifying these common resource-drai
 - ✅ Confirmation prompts before killing any process
 - ✅ Graceful termination (SIGTERM) before force killing (SIGKILL)
 - ✅ Process details displayed before action
+- ✅ Memory usage information for informed decisions
 - ✅ Ability to cancel at any point
 - ✅ Error handling for permission issues
 
