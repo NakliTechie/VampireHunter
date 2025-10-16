@@ -88,6 +88,117 @@ def get_system_memory_info():
         log_error(f"Error getting system memory info: {e}")
         return {}
 
+def classify_node_process(cmdline, command_str):
+    """Classify Node.js process type"""
+    primary_path = next((part for part in cmdline if part.startswith('/')), '')
+    command_lower = command_str.lower()
+
+    # Check for development/coding experiment indicators
+    dev_indicators = [
+        'server.js', 'app.js', 'index.js', 'webpack', 'vite', 'parcel', 'nodemon',
+        'next', 'nuxt', 'express', 'fastify', 'koa', 'hapi', 'nest',
+        'react', 'vue', 'angular', 'svelte', 'astro',
+        'dev', 'development', 'serve', 'start', 'watch', 'hot-reload'
+    ]
+
+    if any(indicator in command_lower for indicator in dev_indicators):
+        return 'development'
+
+    # Check for MCP servers and AI tools
+    if any(keyword in command_lower for keyword in ['mcp', 'model context protocol', 'ollama', 'llm', 'ai', 'agent']):
+        return 'ai-tools'
+
+    if primary_path.startswith('/Users/') or '/users/' in command_lower or '/home/' in command_lower:
+        return 'development'
+
+    if primary_path.startswith(('/System', '/usr', '/bin', '/sbin', '/opt', '/Applications', '/Library')):
+        return 'system'
+
+    if any(keyword in command_lower for keyword in ['vscode', 'visual studio code', 'jetbrains', 'intellij', 'cursor', 'windsor']):
+        return 'system'
+
+    return 'development'
+
+def classify_process(name, cmdline, command_str):
+    """Classify any process type"""
+    name_lower = name.lower()
+    command_lower = command_str.lower()
+
+    # Node.js processes
+    if name_lower == 'node' or any('node' in part.lower() for part in cmdline):
+        return classify_node_process(cmdline, command_str)
+
+    # Python processes
+    if name_lower == 'python' or name_lower.startswith('python') or any('python' in part.lower() for part in cmdline):
+        if any(keyword in command_lower for keyword in ['flask', 'django', 'fastapi', 'uvicorn', 'gunicorn', 'server', 'serve']):
+            return 'development'
+        return 'system'
+
+    # Java processes
+    if name_lower in ['java', 'javaw'] or any('java' in part.lower() for part in cmdline):
+        if any(keyword in command_lower for keyword in ['spring', 'tomcat', 'jetty', 'maven', 'gradle']):
+            return 'development'
+        return 'system'
+
+    # Web servers and databases
+    if name_lower in ['nginx', 'apache', 'httpd', 'mysql', 'postgresql', 'mongo', 'redis', 'elasticsearch']:
+        return 'system'
+
+    # Development tools
+    if any(keyword in command_lower for keyword in ['webpack', 'babel', 'eslint', 'prettier', 'typescript']):
+        return 'development'
+
+    # IDEs and editors
+    if name_lower in ['code', 'cursor', 'windsor', 'sublime_text', 'atom', 'vscode']:
+        return 'system'
+
+    # Media and user apps
+    if name_lower in ['spotify', 'slack', 'discord', 'chrome', 'firefox', 'safari']:
+        return 'user-app'
+
+    # System processes
+    if name_lower in ['system', 'kernel', 'launchd', 'systemd', 'init']:
+        return 'system'
+
+    # Default to system for anything else
+    return 'system'
+
+
+def get_node_processes():
+    """Collect Node.js processes with memory stats"""
+    node_processes = []
+
+    for proc in psutil.process_iter(['pid', 'name', 'cmdline', 'memory_info']):
+        try:
+            name = (proc.info.get('name') or '').lower()
+            cmdline = proc.info.get('cmdline') or []
+
+            if 'node' not in name and not any('node' in part.lower() for part in cmdline):
+                continue
+
+            try:
+                command_str = ' '.join(cmdline) if cmdline else ' '.join(proc.cmdline())
+            except (psutil.AccessDenied, psutil.ZombieProcess):
+                command_str = proc.info.get('name') or f"PID {proc.pid}"
+
+            memory_info = proc.memory_info()
+            rss_kb = memory_info.rss / 1024
+            mem_percent = proc.memory_percent()
+
+            node_processes.append({
+                'pid': proc.pid,
+                'rss_kb': rss_kb,
+                'rss_formatted': format_memory(rss_kb),
+                'mem_percent': mem_percent,
+                'type': classify_node_process(cmdline, command_str),
+                'command': command_str
+            })
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+
+    return node_processes
+
+
 def find_node_packages(root_path=None, max_depth=5):
     """Find all Node.js packages (directories with package.json) recursively"""
     if root_path is None:
@@ -363,30 +474,38 @@ def get_listening_processes():
                     proc = psutil.Process(int(pid))
                     memory_info = proc.memory_info()
                     memory_kb = memory_info.rss / 1024  # RSS in KB
+                    cpu_percent = proc.cpu_percent(interval=0.1)  # Get CPU usage
                     cmdline = ' '.join(proc.cmdline())
                 except (psutil.NoSuchProcess, psutil.AccessDenied, ValueError):
                     # Fallback to ps command if psutil fails
                     try:
-                        ps_result = subprocess.run(['ps', '-o', 'rss,command=', '-p', pid], 
+                        ps_result = subprocess.run(['ps', '-o', 'rss,pcpu,command=', '-p', pid],
                                                  capture_output=True, text=True, check=True)
                         ps_lines = ps_result.stdout.strip().split('\n')
                         if ps_lines and ps_lines[0]:
-                            ps_parts = ps_lines[0].split(None, 1)
+                            ps_parts = ps_lines[0].split(None, 2)
                             memory_kb = int(ps_parts[0]) if ps_parts else 0
-                            cmdline = ps_parts[1] if len(ps_parts) > 1 else "Details unavailable"
+                            cpu_percent = float(ps_parts[1]) if len(ps_parts) > 1 else 0.0
+                            cmdline = ps_parts[2] if len(ps_parts) > 2 else "Details unavailable"
                         else:
                             memory_kb = 0
+                            cpu_percent = 0.0
                             cmdline = "Details unavailable"
                     except (subprocess.CalledProcessError, ValueError, IndexError):
                         memory_kb = 0
                         cmdline = "Details unavailable"
                 
+                # Classify the process
+                category = classify_process(name, cmdline.split(), cmdline)
+
                 processes.append({
                     'pid': pid,
                     'name': name,
                     'port': port,
                     'memory_kb': memory_kb,
                     'memory_formatted': format_memory(memory_kb),
+                    'cpu_percent': cpu_percent,
+                    'category': category,
                     'command': cmdline
                 })
             except (IndexError, ValueError):
@@ -427,27 +546,31 @@ def display_processes(processes):
     # Prepare table data
     table_data = []
     total_memory_kb = 0
-    
+
     for i, proc in enumerate(processes, 1):
         # Truncate long fields for better display
         display_name = proc['name'][:15] if len(proc['name']) > 15 else proc['name']
         display_port = proc['port'][:15] if len(proc['port']) > 15 else proc['port']
         display_memory = proc['memory_formatted']
-        display_command = proc['command'][:50] + '...' if len(proc['command']) > 50 else proc['command']
-        
+        display_cpu = f"{proc['cpu_percent']:.1f}%"
+        display_category = proc['category'][:12] if len(proc['category']) > 12 else proc['category']
+        display_command = proc['command'][:40] + '...' if len(proc['command']) > 40 else proc['command']
+
         table_data.append([
             i,
             proc['pid'],
             display_name,
             display_port,
             display_memory,
+            display_cpu,
+            display_category,
             display_command
         ])
-        
+
         total_memory_kb += proc['memory_kb']
-    
+
     # Display table
-    headers = ["ID", "PID", "Name", "Port", "Memory", "Command"]
+    headers = ["ID", "PID", "Name", "Port", "Memory", "CPU", "Category", "Command"]
     print(tabulate(table_data, headers=headers, tablefmt="grid"))
     
     # Display summary
@@ -557,60 +680,27 @@ def main():
     if len(sys.argv) > 1 and sys.argv[1] in ['-h', '--help']:
         show_help()
         return
-    
+
     # Check if required commands are available
     required_commands = ['lsof', 'vm_stat', 'ps']
     for cmd in required_commands:
         if not subprocess.run(['which', cmd], capture_output=True).returncode == 0:
             log_error(f"{cmd} command not found. Please install {cmd} to use this script.")
             sys.exit(1)
-    
+
     print(f"{COLORS['green']}🧛 Vampire Hunter - Process Manager{COLORS['nc']}")
     print("=" * 38)
     print()
-    
+
     # Main loop to allow refreshing
     while True:
         log_info("Scanning for server processes...")
         processes = get_listening_processes()
         display_processes(processes)
-        
+
         # Also show memory health
         display_memory_health()
-        
-        # Run interactive menu
-        should_refresh = interactive_menu(processes)
-        if not should_refresh:
-            break
 
-
-def main():
-    """Main function"""
-    # Check for help flag
-    if len(sys.argv) > 1 and sys.argv[1] in ['-h', '--help']:
-        show_help()
-        return
-    
-    # Check if required commands are available
-    required_commands = ['lsof', 'vm_stat', 'ps']
-    for cmd in required_commands:
-        if not subprocess.run(['which', cmd], capture_output=True).returncode == 0:
-            log_error(f"{cmd} command not found. Please install {cmd} to use this script.")
-            sys.exit(1)
-    
-    print(f"{COLORS['green']}🧛 Vampire Hunter - Process Manager{COLORS['nc']}")
-    print("=" * 38)
-    print()
-    
-    # Main loop to allow refreshing
-    while True:
-        log_info("Scanning for server processes...")
-        processes = get_listening_processes()
-        display_processes(processes)
-        
-        # Also show memory health
-        display_memory_health()
-        
         # Run interactive menu
         should_refresh = interactive_menu(processes)
         if not should_refresh:
